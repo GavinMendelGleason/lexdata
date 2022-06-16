@@ -1,6 +1,8 @@
 use gmp_mpfr_sys::gmp;
-use byteorder::{BigEndian, WriteBytesExt};
-
+use byteorder::{
+    BigEndian,
+    WriteBytesExt
+};
 
 /// size_encode takes a vector representing the
 /// order of a number and converts it into a vector of bytes
@@ -131,7 +133,7 @@ fn convert_mpz_lex(z : *mut gmp_mpfr_sys::gmp::mpz_t) -> Vec<u8> {
     }else{
         // we need to get the first limb to get the true size
         // as we need leading zeros to be neglected
-        let limb0 = unsafe{ gmp::mpz_getlimbn(z,0) };
+        let limb0 = unsafe{ gmp::mpz_getlimbn(z,size as i64 -1) };
         let zeros = limb0.leading_zeros();
         let zero_bytes = zeros as usize / BYTES_PER_WORD;
         println!("size: {:}", size);
@@ -140,9 +142,15 @@ fn convert_mpz_lex(z : *mut gmp_mpfr_sys::gmp::mpz_t) -> Vec<u8> {
         let mut vec = size_enc(bytes);
         println!("encoded size: {:?}", vec);
         let mut limb_vector = limb_vec(limb0)[zero_bytes..BYTES_PER_WORD].to_vec();
-        for i in 1..size {
-            let limb_num = unsafe{ gmp::mpz_getlimbn(z,i as i64) };
+
+        for i in 2..size+1 {
+            println!("..........other limbs");
+            let j = size as i64 - i as i64;
+            let limb_num = unsafe{ gmp::mpz_getlimbn(z,j) };
+            println!("j: {:?}", j);
+            println!("limb_num: {:?}", limb_num);
             let mut limb = limb_vec(limb_num);
+            println!("limb: {:?}", limb);
             limb_vector.append(&mut limb);
         }
         vec.append(&mut limb_vector);
@@ -241,9 +249,8 @@ mod tests {
             gmp::mpz_get_str(cstring_ptr, 10, &mut z);
             gmp::mpz_clear(&mut z);
         }
-        let s = str_from_cstr(cstring_ptr).to_string();
-        println!("{:?}", s);
-        s
+
+        str_from_cstr(cstring_ptr).to_string()
     }
 
     #[test]
@@ -299,18 +306,42 @@ mod tests {
         let s = "-12";
         number_lexical_round_trip(s);
 
-        //let s = "87292342342342342342342346547768087384729384729";
-        //number_lexical_round_trip(s);
+        let s = "8729234234234234";
+        number_lexical_round_trip(s);
+
+        let s = "172923423423423423429";
+        number_lexical_round_trip(s);
+
+        let s = "87292342342342342342342346547768087384729384729";
+        number_lexical_round_trip(s);
+
+        let s = "9802348729234234223423423432456342342342342346547768087384729384729";
+        number_lexical_round_trip(s);
+
+        let s = "-9802348729234234223423423432456342342342342346547768087384729384729";
+        number_lexical_round_trip(s);
 
     }
 
     #[test]
     fn sort_lexicals() {
-        let v = vec!["2342343","0","-23423","9","-23"];
+        let v = vec!["2342343",
+                     "87292342342342342342342346547768087384729384729",
+                     "0",
+                     "-23423",
+                     "-23",
+                     "9",
+                     "-9802348729234234223423423432456342342342342346547768087384729384729"];
         let mut vecs : Vec<Vec<u8>> = v.iter().map(|s| number_lexical(s)).collect();
         vecs.sort();
         let strs1 : Vec<String> = vecs.iter().map(|l| lexical_number(l)).collect();
-        let strs2 = vec!["-23423", "-23", "0", "9", "2342343"];
+        let strs2 = vec!["-9802348729234234223423423432456342342342342346547768087384729384729",
+                         "-23423",
+                         "-23",
+                         "0",
+                         "9",
+                         "2342343",
+                         "87292342342342342342342346547768087384729384729"];
         assert_eq!(strs1,strs2)
     }
 
