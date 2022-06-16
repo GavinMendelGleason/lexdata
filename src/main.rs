@@ -1,10 +1,6 @@
-use std::mem;
-use std::num;
-use core::mem::MaybeUninit;
 use gmp_mpfr_sys::gmp;
-use byteorder::{BigEndian, WriteBytesExt, ReadBytesExt};
-use std::ffi::CStr;
-use std::os::raw::c_char;
+use byteorder::{BigEndian, WriteBytesExt};
+
 
 /// size_encode takes a vector representing the
 /// order of a number and converts it into a vector of bytes
@@ -25,14 +21,14 @@ use std::os::raw::c_char;
 /// entire result and therby end up with a negative, so it
 /// is always 1 here.
 
-const TERMINAL : usize = 0;
-const FIRST_SIGN : usize = 0b10000000usize;
-const FIRST_TERMINAL : usize = 0b00000000usize;
-const CONTINUATION : usize = 0b10000000usize;
-const FIRST_CONTINUATION : usize = 0b01000000usize;
-const BASE_MASK : usize = !CONTINUATION;
-const FIRST_MASK : usize = !(FIRST_SIGN | FIRST_CONTINUATION);
-const FIRST_MAX : usize = FIRST_CONTINUATION;
+const TERMINAL : u8 = 0;
+const FIRST_SIGN : u8 = 0b10000000u8;
+const FIRST_TERMINAL : u8 = 0b00000000u8;
+const CONTINUATION : u8 = 0b10000000u8;
+const FIRST_CONTINUATION : u8 = 0b01000000u8;
+const BASE_MASK : u8 = !CONTINUATION;
+const FIRST_MASK : u8 = !(FIRST_SIGN | FIRST_CONTINUATION);
+const FIRST_MAX : u8 = FIRST_CONTINUATION;
 
 fn size_enc(size : usize) -> Vec<u8> {
     println!("size_enc");
@@ -42,31 +38,31 @@ fn size_enc(size : usize) -> Vec<u8> {
     let mut last = true;
     while remainder > 0 {
         println!("remainder: {:}", remainder);
-        if remainder >= CONTINUATION {
+        if remainder >= CONTINUATION as usize {
             println!("big");
             let continued = if last {TERMINAL} else {CONTINUATION};
             println!("continued: {:#b}", continued);
-            let byte = (continued | (remainder & BASE_MASK)) as u8;
+            let byte = continued | ((remainder & BASE_MASK as usize) as u8);
             println!("byte: {:#b}", byte);
             v.push(byte);
-        }else if remainder >= FIRST_MAX {
+        }else if remainder >= FIRST_MAX as usize {
             // special case where we fit in 7 bits but not 6
             // and we need a zero padded initial byte.
             println!("medium");
             let continued = if last {TERMINAL} else {CONTINUATION};
             println!("continued: {:#b}", continued);
-            let byte = (continued | (remainder & BASE_MASK)) as u8;
+            let byte = continued | ((remainder & BASE_MASK as usize) as u8);
             println!("byte: {:#b}", byte);
             v.push(byte);
             println!("zero pad");
-            let byte = (FIRST_SIGN | FIRST_CONTINUATION) as u8;
+            let byte = FIRST_SIGN | FIRST_CONTINUATION;
             println!("byte: {:#b}", byte);
             v.push(byte)
         }else{
             println!("small");
             let continued = if last {FIRST_TERMINAL} else {FIRST_CONTINUATION};
             println!("continued: {:#b}", continued);
-            let byte = (FIRST_SIGN | continued | (remainder & FIRST_MASK)) as u8;
+            let byte = FIRST_SIGN | continued | ((remainder & FIRST_MASK as usize) as u8);
             println!("byte: {:#b}", byte);
             v.push(byte)
         }
@@ -77,30 +73,38 @@ fn size_enc(size : usize) -> Vec<u8> {
     v
 }
 
-fn size_dec(v : &[u8]) -> (usize,usize) {
+fn size_dec(v : &[u8]) -> (bool,usize,usize) {
     println!("size_dec");
     println!("-------------------------------");
     println!("v: {:?}", v);
-    let mut size = 0;
+    let mut size : usize = 0;
+    let mut sign = true;
     for i in 0..v.len() {
-        let vi = v[i] as usize;
+        let vi = v[i] as u8;
         println!("v[i]: {:#b}", v[i]);
         if i == 0 {
+            sign  = if vi != 0 && vi & FIRST_SIGN == 0 { false } else { true };
+            println!("sign: {:?}", sign);
+            let vi = if sign { vi } else { !vi };
+            println!("val: {:?}", vi);
+            let val = (vi & FIRST_MASK) as usize;
             if vi & FIRST_CONTINUATION == 0 {
-                return (vi & FIRST_MASK,i+1)
+                return (sign,val,i+1)
             }else{
-                size = size + (vi & FIRST_MASK)
+                size = size + val
             }
         }else{
+            let vi = if sign { vi } else { !vi };
+            let val = (vi & BASE_MASK) as usize;
             if vi & CONTINUATION == 0 {
-                return (size + (vi & BASE_MASK),i+1)
+                return (sign,size+val,i+1)
             }else{
-                size = size + (vi & BASE_MASK)
+                size = size + val
             }
         }
         size = size << 7;
     }
-    (size,v.len())
+    (sign,size,v.len())
 }
 
 fn limb_vec(l : gmp_mpfr_sys::gmp::limb_t) -> Vec<u8> {
@@ -123,7 +127,7 @@ fn convert_mpz_lex(z : *mut gmp_mpfr_sys::gmp::mpz_t) -> Vec<u8> {
     let sign = unsafe{ gmp::mpz_sgn(z) };
     let size = unsafe{ gmp::mpz_size(z) };
     if size == 0 {
-        return vec![0]
+        return vec![FIRST_SIGN]
     }else{
         // we need to get the first limb to get the true size
         // as we need leading zeros to be neglected
@@ -152,17 +156,27 @@ fn convert_mpz_lex(z : *mut gmp_mpfr_sys::gmp::mpz_t) -> Vec<u8> {
 
 // we have to pass in the pointer since we don't know anything about lifetimes.
 fn convert_lex_mpz(v : &[u8], z : *mut gmp_mpfr_sys::gmp::mpz_t) -> () {
-    let (size,offset) = size_dec(v);
+    println!("convert_lex_mpz: {:?}", v);
+    println!("---------------------");
+    let (sign,size,offset) = size_dec(v);
+    unsafe { gmp::mpz_init_set_ui(z, 0) };
+    if size == 0 { return () };
     println!("size: {:}, offset: {:}",size,offset);
     for i in offset..size+1 {
         if i != offset {
             unsafe{
-                gmp::mpz_pow_ui(z,z,2^7);
+                gmp::mpz_mul_2exp(z,z,8);
             }
+
         }
-        println!("v[i] = {:}", v[i]);
+        let val = if sign {v[i]} else {!v[i]};
         unsafe{
-            gmp::mpz_add_ui(z,z,v[i] as u64);
+            gmp::mpz_add_ui(z,z,val as u64);
+        }
+    }
+    if !sign {
+        unsafe{
+            gmp::mpz_mul_si(z,z,-1);
         }
     }
 }
@@ -176,7 +190,61 @@ mod tests {
 
     use core::mem::MaybeUninit;
     use gmp_mpfr_sys::gmp;
-    use std::ffi::{CStr,CString};
+    use std::ffi::{CString};
+    use core::{slice, str};
+    use libc::c_char;
+
+    fn str_from_cstr<'a>(cstr: *const c_char) -> &'a str {
+        let s = unsafe { slice::from_raw_parts(cstr as *const u8, libc::strlen(cstr)) };
+        str::from_utf8(s).expect("version not utf8")
+    }
+
+    fn number_lexical_round_trip<'a>(s1: &'a str) -> () {
+        let lex = number_lexical(s1);
+        let s2 = lexical_number(&lex);
+        println!("{:?}", s2);
+        assert_eq!(s1,s2);
+    }
+
+    fn number_lexical<'a>(s: &'a str) -> Vec<u8> {
+        println!("number_lexical: {:}", s);
+        println!("--------------------");
+        let mut z = MaybeUninit::uninit();
+        unsafe{ gmp::mpz_init(z.as_mut_ptr()) };
+        let mut z = unsafe { z.assume_init() };
+        let cstring = CString::new(s).expect("Cstring::new failed");
+        let cstring_ptr = cstring.as_ptr();
+        if -1 == unsafe{ gmp::mpz_init_set_str(&mut z, cstring_ptr, 10)}{
+            panic!("mpz_init_set_str failed")
+        };
+
+        let vec = crate::convert_mpz_lex(&mut z);
+        unsafe{gmp::mpz_clear(&mut z)};
+        vec
+    }
+
+    fn lexical_number(v: &[u8]) -> String {
+        println!("lexical_number: {:?}", v);
+        println!("--------------------");
+        let mut z = MaybeUninit::uninit();
+        unsafe { gmp::mpz_init(z.as_mut_ptr()) };
+        let mut z = unsafe{ z.assume_init() };
+
+        crate::convert_lex_mpz(v,&mut z);
+
+        let str_size = unsafe { gmp::mpz_sizeinbase(&mut z, 10) } + 2;
+        println!("str_size: {:}", str_size);
+        let mut c_chars : Vec<i8> = vec![0;str_size];
+        let cstring_ptr = c_chars.as_mut_ptr();
+
+        unsafe {
+            gmp::mpz_get_str(cstring_ptr, 10, &mut z);
+            gmp::mpz_clear(&mut z);
+        }
+        let s = str_from_cstr(cstring_ptr).to_string();
+        println!("{:?}", s);
+        s
+    }
 
     #[test]
     fn find_bytes_and_pad() {
@@ -195,109 +263,55 @@ mod tests {
     #[test]
     fn in_and_out() {
         let size = 4095; // [0b00001111u8,0b11111111u8];
-        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).0);
+        println!("Here");
+        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).1);
 
         // just a random number
         let size = 23423423;
-        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).0);
+        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).1);
 
         // boundary case for overflow spillover
         let size = 72057594037927935;
-        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).0);
+        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).1);
 
         let size = 1;
-        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).0);
+        assert_eq!(size, crate::size_dec(&crate::size_enc(size)).1);
     }
 
     #[test]
     fn mpz_lex_conversions() {
-        unsafe {
-            let mut z1 = MaybeUninit::uninit();
-            gmp::mpz_init(z1.as_mut_ptr());
-            let mut z1 = z1.assume_init();
-            let s1 = "1";
-            let cstring1 = CString::new(s1).expect("Cstring::new failed");
-            let cstring_ptr1 = cstring1.as_ptr();
-            gmp::mpz_init_set_str(&mut z1, cstring_ptr1, 10);
-            let mut z2 = MaybeUninit::uninit();
-            gmp::mpz_init(z2.as_mut_ptr());
-            let mut z2 = z2.assume_init();
 
-            let u = gmp::mpz_get_ui(&z2);
-            assert_eq!(u,1);
+        let s = "0";
+        number_lexical_round_trip(s);
 
-            crate::convert_lex_mpz(&crate::convert_mpz_lex(&mut z1),&mut z2);
-            let cstring_ptr2 : *mut i8 = std::ptr::null_mut();
-            gmp::mpz_get_str(cstring_ptr2, 10, &mut z2);
+        let s = "1";
+        number_lexical_round_trip(s);
 
-            let s2 = CStr::from_ptr(cstring_ptr2).to_string_lossy().into_owned();
-            assert_eq!(s1,"asdf");
-            assert_eq!(s1,s2)
+        let s = "2";
+        number_lexical_round_trip(s);
 
-        }
+        let s = "4095";
+        number_lexical_round_trip(s);
 
-        unsafe {
-            let mut z1 = MaybeUninit::uninit();
-            gmp::mpz_init(z1.as_mut_ptr());
-            let mut z1 = z1.assume_init();
-            let s1 = "23423498723432";
-            let cstring1 = CString::new(s1).expect("Cstring::new failed");
-            let cstring_ptr1 = cstring1.as_ptr();
-            gmp::mpz_init_set_str(&mut z1, cstring_ptr1, 10);
-            let mut z2 = MaybeUninit::uninit();
-            gmp::mpz_init(z2.as_mut_ptr());
-            let mut z2 = z2.assume_init();
+        let s = "23423498723432";
+        number_lexical_round_trip(s);
 
-            crate::convert_lex_mpz(&crate::convert_mpz_lex(&mut z1),&mut z2);
+        let s = "-12";
+        number_lexical_round_trip(s);
 
-            let cstring_ptr2 : *mut i8 = std::ptr::null_mut();
-            gmp::mpz_get_str(cstring_ptr2, 10, &mut z2);
-            assert_eq!(1,2);
-
-            let s2 = CStr::from_ptr(cstring_ptr2).to_string_lossy().into_owned();
-            
-            assert_eq!(s1,"asdf");
-            assert_eq!(s1,s2)
-
-        }
-    }
-
-    #[test]
-    fn encode_gmp() {
-        unsafe {
-            let mut z = MaybeUninit::uninit();
-            gmp::mpz_init(z.as_mut_ptr());
-            let mut z = z.assume_init();
-            gmp::mpz_set_si(&mut z, 4095);
-            let vec = crate::convert_mpz_lex(&mut z);
-            assert_eq!(vec, vec![130, 15, 255]);
-        }
-
-        unsafe {
-            let mut z = MaybeUninit::uninit();
-            gmp::mpz_init(z.as_mut_ptr());
-            let mut z = z.assume_init();
-            gmp::mpz_set_si(&mut z, -4095);
-            let vec = crate::convert_mpz_lex(&mut z);
-            assert_eq!(vec, vec![125, 240, 0]);
-        }
+        //let s = "87292342342342342342342346547768087384729384729";
+        //number_lexical_round_trip(s);
 
     }
 
     #[test]
-    fn test_gmp_order() {
-        unsafe {
-            let mut z = MaybeUninit::uninit();
-            gmp::mpz_init(z.as_mut_ptr());
-            let mut z = z.assume_init();
-            gmp::mpz_set_ui(&mut z, 15);
-            let sign = gmp::mpz_sgn(&z);
-            assert_eq!(sign, 1);
-            let sz = gmp::mpz_sizeinbase(&z,2);
-            assert_eq!(sz, 4);
-            let u = gmp::mpz_get_ui(&z);
-            assert_eq!(u, 15);
-            gmp::mpz_clear(&mut z);
-        }
+    fn sort_lexicals() {
+        let v = vec!["2342343","0","-23423","9","-23"];
+        let mut vecs : Vec<Vec<u8>> = v.iter().map(|s| number_lexical(s)).collect();
+        vecs.sort();
+        let strs1 : Vec<String> = vecs.iter().map(|l| lexical_number(l)).collect();
+        let strs2 = vec!["-23423", "-23", "0", "9", "2342343"];
+        assert_eq!(strs1,strs2)
     }
+
 }
